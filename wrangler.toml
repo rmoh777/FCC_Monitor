@@ -15,4 +15,4 @@ id = "a372c0cb784d4284a7d4b8b25083da62"
 preview_id = "6f4420b277fe4917b2058f1276866aa2"
 
 [triggers]
-crons = ["0 */1 * * *"]  # Run every hour 
+crons = ["*/5 * * * *"]  # Base trigger: every 5 minutes; actual run frequency controlled in code 
