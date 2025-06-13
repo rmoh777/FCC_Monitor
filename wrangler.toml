@@ -1,0 +1,18 @@
+name = "fcc-monitor"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+ECFS_API_BASE_URL = "https://publicapi.fcc.gov/ecfs"
+
+# Note: ECFS_API_KEY and SLACK_WEBHOOK_URL should be set using wrangler secret
+# Run: wrangler secret put ECFS_API_KEY
+# Run: wrangler secret put SLACK_WEBHOOK_URL
+
+[[kv_namespaces]]
+binding = "FCC_MONITOR_KV"
+id = "a372c0cb784d4284a7d4b8b25083da62"
+preview_id = "6f4420b277fe4917b2058f1276866aa2"
+
+[triggers]
+crons = ["0 */1 * * *"]  # Run every hour 
