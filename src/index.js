@@ -3,6 +3,7 @@ import { sendToSlack } from './slack.js';
 import { logMessage } from './utils.js';
 import { getDashboardHTML } from './dashboard.js';
 import { getDefaultTemplate, applyTemplate, getSampleFiling } from './slack.js';
+import { sendToX, processRetryQueue, encryptCredentials, testXPost, getDefaultXTemplate } from './x-integration.js';
 
 export default {
   async scheduled(event, env, ctx) {
@@ -26,9 +27,20 @@ export default {
           const template = await env.FCC_MONITOR_KV.get('dashboard_template');
           const freqStr = await env.FCC_MONITOR_KV.get('monitor_frequency_minutes');
           const frequency = freqStr ? parseInt(freqStr, 10) : 60;
+          
+          // X Configuration
+          const xEnabled = await env.FCC_MONITOR_KV.get('x_posting_enabled');
+          const xCredentialsSet = !!(await env.FCC_MONITOR_KV.get('x_credentials'));
+          const xTemplate = await env.FCC_MONITOR_KV.get('x_template');
+          const xOnlyMode = await env.FCC_MONITOR_KV.get('x_only_mode');
+          
           return new Response(JSON.stringify({ 
             template: template || getDefaultTemplate(),
-            frequency 
+            frequency,
+            xEnabled: xEnabled === 'true',
+            xCredentialsSet,
+            xTemplate: xTemplate || getDefaultXTemplate(),
+            xOnlyMode: xOnlyMode === 'true'
           }), {
             headers: { 'Content-Type': 'application/json' }
           });
@@ -42,7 +54,7 @@ export default {
       
       if (request.method === 'POST') {
         try {
-          const { template, frequency } = await request.json();
+          const { template, frequency, xEnabled, xCredentials, xTemplate, xOnlyMode } = await request.json();
 
           if (template !== undefined) {
             await env.FCC_MONITOR_KV.put('dashboard_template', template);
@@ -51,6 +63,26 @@ export default {
           if (frequency !== undefined) {
             await env.FCC_MONITOR_KV.put('monitor_frequency_minutes', frequency.toString());
           }
+          
+          // X Configuration
+          if (xEnabled !== undefined) {
+            await env.FCC_MONITOR_KV.put('x_posting_enabled', xEnabled.toString());
+          }
+          
+          if (xCredentials) {
+            // Encrypt and store X credentials
+            const encrypted = await encryptCredentials(xCredentials, env);
+            await env.FCC_MONITOR_KV.put('x_credentials', encrypted);
+          }
+          
+          if (xTemplate !== undefined) {
+            await env.FCC_MONITOR_KV.put('x_template', xTemplate);
+          }
+          
+          if (xOnlyMode !== undefined) {
+            await env.FCC_MONITOR_KV.put('x_only_mode', xOnlyMode.toString());
+          }
+          
           return new Response(JSON.stringify({ success: true }), {
             headers: { 'Content-Type': 'application/json' }
           });
@@ -77,6 +109,25 @@ export default {
         });
       } catch (error) {
         return new Response(JSON.stringify({ error: error.message }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+    
+    // Test X posting endpoint
+    if (url.pathname === '/api/test-x' && request.method === 'POST') {
+      try {
+        const { template } = await request.json();
+        const result = await testXPost(env, template);
+        return new Response(JSON.stringify(result), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          success: false,
+          error: error.message 
+        }), { 
           status: 500,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -159,6 +210,16 @@ async function handleScheduled(env) {
     }
     logMessage('Starting FCC monitoring check...');
     
+    // First, process any X retry queue items
+    try {
+      const retryResult = await processRetryQueue(env);
+      if (retryResult.processed > 0) {
+        logMessage(`Processed ${retryResult.processed} items from X retry queue, ${retryResult.remaining} remaining`);
+      }
+    } catch (error) {
+      logMessage(`Error processing X retry queue: ${error.message}`);
+    }
+    
     // Throttle logic based on configurable frequency
     const freqStr = await env.FCC_MONITOR_KV.get('monitor_frequency_minutes');
     const frequencyMinutes = freqStr ? parseInt(freqStr, 10) : 60; // default 60 min
@@ -200,8 +261,43 @@ async function handleScheduled(env) {
         // Limit to first 10 filings to avoid overwhelming Slack
         const filingsToProcess = newFilings.slice(0, 10);
         
-        // Send to Slack
-        await sendToSlack(filingsToProcess, env);
+        // Check if X-only mode is enabled
+        const xOnlyMode = await env.FCC_MONITOR_KV.get('x_only_mode');
+        
+        // Parallel posting to Slack and X
+        const postingResults = await Promise.allSettled([
+          // Send to Slack (unless X-only mode)
+          xOnlyMode === 'true' ? 
+            Promise.resolve({ success: true, skipped: true, reason: 'X-only mode' }) : 
+            sendToSlack(filingsToProcess, env),
+          
+          // Send to X (if enabled)
+          sendToX(filingsToProcess, env)
+        ]);
+        
+        const [slackResult, xResult] = postingResults;
+        
+        // Log results
+        if (slackResult.status === 'fulfilled') {
+          if (slackResult.value.skipped) {
+            logMessage(`Slack posting: ${slackResult.value.reason || 'skipped'}`);
+          } else {
+            logMessage('Slack posting: completed successfully');
+          }
+        } else {
+          logMessage(`Slack posting failed: ${slackResult.reason?.message}`);
+        }
+        
+        if (xResult.status === 'fulfilled') {
+          const result = xResult.value;
+          if (result.skipped) {
+            logMessage(`X posting: ${result.reason || 'disabled'}`);
+          } else {
+            logMessage(`X posting: ${result.posted || 0} posted, ${result.queued || 0} queued`);
+          }
+        } else {
+          logMessage(`X posting failed: ${xResult.reason?.message}`);
+        }
         
         // Mark these filings as processed (expire after 7 days) - batch operation
         await Promise.all(

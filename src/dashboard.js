@@ -349,6 +349,71 @@ export function getDashboardHTML() {
             </button>
           </div>
           
+          <div class="panel">
+            <h2>🐦 X (Twitter) Settings</h2>
+            <div class="help-text">
+              <strong>Configure X (Twitter) posting:</strong>
+              Enable posting to X alongside or instead of Slack notifications.
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+              <label style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <input type="checkbox" id="xEnabled" onchange="toggleXSettings()">
+                <span>Enable X (Twitter) Posting</span>
+              </label>
+            </div>
+            
+            <div id="xSettingsPanel" style="display: none;">
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">API Key:</label>
+                  <input type="password" id="xApiKey" placeholder="Consumer Key" 
+                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
+                </div>
+                <div>
+                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">API Secret:</label>
+                  <input type="password" id="xApiSecret" placeholder="Consumer Secret" 
+                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
+                </div>
+                <div>
+                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">Access Token:</label>
+                  <input type="password" id="xAccessToken" placeholder="Access Token" 
+                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
+                </div>
+                <div>
+                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">Access Token Secret:</label>
+                  <input type="password" id="xAccessTokenSecret" placeholder="Access Token Secret" 
+                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
+                </div>
+              </div>
+              <div style="font-size: 12px; color: #666; margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 6px;">
+                <strong>Get these from X Developer Portal:</strong><br>
+                1. Go to <a href="https://developer.twitter.com/en/portal/dashboard" target="_blank">X Developer Portal</a><br>
+                2. Select your app → Keys and Tokens<br>
+                3. Generate all 4 credentials above<br>
+                4. Ensure your app has "Read and Write" permissions
+              </div>
+              
+              <div style="margin-bottom: 15px;">
+                <label style="display: flex; align-items: center; gap: 10px;">
+                  <input type="checkbox" id="xOnlyMode">
+                  <span>X-Only Mode (skip Slack)</span>
+                </label>
+              </div>
+              
+              <div class="button-group">
+                <button class="btn-primary" onclick="saveXSettings()">
+                  💾 Save X Settings
+                </button>
+                <button class="btn-success" onclick="testXPost()">
+                  🧪 Test X Post
+                </button>
+              </div>
+            </div>
+            
+            <div id="xStatus" style="margin-top: 10px; font-size: 12px;"></div>
+          </div>
+          
           <div class="panel actions-panel">
             <h2>⚡ Quick Actions</h2>
             <div class="button-group">
@@ -405,6 +470,21 @@ export function getDashboardHTML() {
             if (freqSelect && data.frequency) {
               freqSelect.value = data.frequency.toString();
             }
+            
+            // Load X settings
+            const xEnabled = document.getElementById('xEnabled');
+            const xOnlyMode = document.getElementById('xOnlyMode');
+            if (xEnabled) {
+              xEnabled.checked = data.xEnabled || false;
+              toggleXSettings(); // Show/hide panel based on enabled state
+            }
+            if (xOnlyMode) {
+              xOnlyMode.checked = data.xOnlyMode || false;
+            }
+            
+            // Update X status
+            updateXStatus(data.xCredentialsSet, data.xEnabled);
+            
             updateCharCount();
             updatePreview();
           } catch (error) {
@@ -617,6 +697,125 @@ export function getDashboardHTML() {
           setTimeout(() => {
             status.classList.remove('show');
           }, 4000);
+        }
+
+        // === X (TWITTER) FUNCTIONS ===
+        
+        // Toggle X settings panel visibility
+        function toggleXSettings() {
+          const enabled = document.getElementById('xEnabled').checked;
+          const panel = document.getElementById('xSettingsPanel');
+          panel.style.display = enabled ? 'block' : 'none';
+        }
+        
+        // Update X status indicator
+        function updateXStatus(credentialsSet, enabled) {
+          const statusDiv = document.getElementById('xStatus');
+          if (!enabled) {
+            statusDiv.innerHTML = '<span style="color: #999;">❌ X posting disabled</span>';
+          } else if (!credentialsSet) {
+            statusDiv.innerHTML = '<span style="color: #ff6b6b;">⚠️ X credentials not configured</span>';
+          } else {
+            statusDiv.innerHTML = '<span style="color: #51cf66;">✅ X posting configured and enabled</span>';
+          }
+        }
+        
+        // Save X settings
+        async function saveXSettings() {
+          const xEnabled = document.getElementById('xEnabled').checked;
+          const xApiKey = document.getElementById('xApiKey').value;
+          const xApiSecret = document.getElementById('xApiSecret').value;
+          const xAccessToken = document.getElementById('xAccessToken').value;
+          const xAccessTokenSecret = document.getElementById('xAccessTokenSecret').value;
+          const xOnlyMode = document.getElementById('xOnlyMode').checked;
+          
+          if (xEnabled) {
+            if (!xApiKey.trim() || !xApiSecret.trim() || !xAccessToken.trim() || !xAccessTokenSecret.trim()) {
+              showStatus('Please enter all 4 X API credentials', 'error');
+              return;
+            }
+          }
+          
+          try {
+            const requestBody = {
+              xEnabled,
+              xOnlyMode
+            };
+            
+            // Only send credentials if all are provided
+            if (xApiKey.trim() && xApiSecret.trim() && xAccessToken.trim() && xAccessTokenSecret.trim()) {
+              requestBody.xCredentials = {
+                apiKey: xApiKey.trim(),
+                apiSecret: xApiSecret.trim(),
+                accessToken: xAccessToken.trim(),
+                accessTokenSecret: xAccessTokenSecret.trim()
+              };
+            }
+            
+            const response = await fetch('/api/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(requestBody)
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+              showStatus('X settings saved successfully!', 'success');
+              // Clear the password fields after successful save
+              document.getElementById('xApiKey').value = '';
+              document.getElementById('xApiSecret').value = '';
+              document.getElementById('xAccessToken').value = '';
+              document.getElementById('xAccessTokenSecret').value = '';
+              // Update status
+              updateXStatus(true, xEnabled);
+            } else {
+              showStatus('Error saving X settings: ' + result.error, 'error');
+            }
+          } catch (error) {
+            showStatus('Error saving X settings: ' + error.message, 'error');
+          }
+        }
+        
+        // Test X posting
+        async function testXPost() {
+          const template = document.getElementById('template').value;
+          
+          if (!template.trim()) {
+            showStatus('Please enter a template first', 'error');
+            return;
+          }
+          
+          try {
+            showStatus('Testing X post...', 'info');
+            
+            const response = await fetch('/api/test-x', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ template })
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+              showStatus(\`Test post sent to X successfully! Tweet ID: \${result.tweetId}\`, 'success');
+              // Show preview of what was sent
+              if (result.preview) {
+                const previewContent = document.getElementById('previewContent');
+                previewContent.textContent = \`[X POST] \${result.preview}\`;
+                previewContent.classList.remove('empty');
+              }
+            } else {
+              showStatus('X test failed: ' + result.error, 'error');
+              // Still show preview even if posting failed
+              if (result.preview) {
+                const previewContent = document.getElementById('previewContent');
+                previewContent.textContent = \`[X PREVIEW] \${result.preview}\`;
+                previewContent.classList.remove('empty');
+              }
+            }
+          } catch (error) {
+            showStatus('Error testing X post: ' + error.message, 'error');
+          }
         }
 
         // Event listeners
