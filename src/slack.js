@@ -1,6 +1,63 @@
 import { logMessage } from './utils.js';
 
-export async function sendToSlack(filings, env) {
+// Default template (extracted from current hardcoded format)
+const DEFAULT_TEMPLATE = `🚨 NEW FCC FILING
+
+📋 {filing_type}: {title}
+🏢 {author}
+📅 {date}
+🔗 WC {docket}
+
+{url}
+
+#Lifeline #FCC`;
+
+export async function getTemplateFromKV(env) {
+  try {
+    const template = await env.FCC_MONITOR_KV.get('dashboard_template');
+    return template || DEFAULT_TEMPLATE;
+  } catch (error) {
+    console.error('Error reading template from KV:', error);
+    return DEFAULT_TEMPLATE;
+  }
+}
+
+export function applyTemplate(template, filing) {
+  const formatDate = (dateStr) => {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', { 
+      month: '2-digit', 
+      day: '2-digit', 
+      year: '2-digit' 
+    });
+  };
+
+  return template
+    .replace(/{filing_type}/g, filing.filing_type || 'Filing')
+    .replace(/{title}/g, filing.title || 'Untitled')
+    .replace(/{author}/g, filing.author || 'Anonymous')
+    .replace(/{date}/g, formatDate(filing.date_received))
+    .replace(/{docket}/g, filing.docket_number || '')
+    .replace(/{url}/g, filing.filing_url || '');
+}
+
+export function getSampleFiling() {
+  return {
+    id: 'sample123',
+    docket_number: '11-42',
+    filing_type: 'COMMENT',
+    title: 'Sample Public Comment on Lifeline Program',
+    author: 'Example Organization',
+    date_received: '2025-01-15',
+    filing_url: 'https://www.fcc.gov/ecfs/search/search-filings/filing/sample123'
+  };
+}
+
+export function getDefaultTemplate() {
+  return DEFAULT_TEMPLATE;
+}
+
+export async function sendToSlack(filings, env, customTemplate = null) {
   const webhookUrl = env.SLACK_WEBHOOK_URL;
   
   if (!webhookUrl) {
@@ -12,28 +69,12 @@ export async function sendToSlack(filings, env) {
     return;
   }
 
+  // Get template from KV once for all filings (unless custom template provided)
+  const template = customTemplate || await getTemplateFromKV(env);
+  
   const blocks = filings.map(filing => {
-    // Format date as MM/DD/YY
-    const formatDate = (dateStr) => {
-      const date = new Date(dateStr);
-      return date.toLocaleDateString('en-US', { 
-        month: '2-digit', 
-        day: '2-digit', 
-        year: '2-digit' 
-      });
-    };
-
-    // Create X.com-ready message (under 240 chars)
-    let tweetText = `🚨 NEW FCC FILING
-
-📋 ${filing.filing_type}: ${filing.title}
-🏢 ${filing.author}
-📅 ${formatDate(filing.date_received)}
-🔗 WC ${filing.docket_number}
-
-${filing.filing_url}
-
-#Lifeline #FCC`;
+    // Apply template to filing
+    let tweetText = applyTemplate(template, filing);
 
     // Ensure under 240 characters by truncating if needed
     if (tweetText.length > 240) {
@@ -43,16 +84,8 @@ ${filing.filing_url}
         ? filing.title.substring(0, maxTitleLength) + '...'
         : filing.title;
       
-      tweetText = `🚨 NEW FCC FILING
-
-📋 ${filing.filing_type}: ${shortTitle}
-🏢 ${filing.author}
-📅 ${formatDate(filing.date_received)}
-🔗 WC ${filing.docket_number}
-
-${filing.filing_url}
-
-#Lifeline #FCC`;
+      const updatedFiling = { ...filing, title: shortTitle };
+      tweetText = applyTemplate(template || DEFAULT_TEMPLATE, updatedFiling);
       
       // If still too long, shorten author name
       if (tweetText.length > 240) {
@@ -61,16 +94,8 @@ ${filing.filing_url}
           ? filing.author.substring(0, maxAuthorLength) + '...'
           : filing.author;
         
-        tweetText = `🚨 NEW FCC FILING
-
-📋 ${filing.filing_type}: ${shortTitle}
-🏢 ${shortAuthor}
-📅 ${formatDate(filing.date_received)}
-🔗 WC ${filing.docket_number}
-
-${filing.filing_url}
-
-#Lifeline #FCC`;
+        const finalFiling = { ...updatedFiling, author: shortAuthor };
+        tweetText = applyTemplate(template || DEFAULT_TEMPLATE, finalFiling);
       }
     }
 
