@@ -19,6 +19,15 @@ const DEFAULT_X_TEMPLATE = `🚨 NEW FCC FILING
 
 #FCC #{docket} #Telecom`;
 
+export function getDefaultXTemplate() {
+  return DEFAULT_X_TEMPLATE;
+}
+
+export async function getXTemplateFromKV(env) {
+  const template = await env.FCC_MONITOR_KV.get('dashboard_template');
+  return template || DEFAULT_X_TEMPLATE;
+}
+
 // === CREDENTIAL ENCRYPTION FUNCTIONS ===
 
 export async function encryptCredentials(credentials, env) {
@@ -38,7 +47,7 @@ export async function encryptCredentials(credentials, env) {
   const encrypted = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
-    new TextEncoder().encode(JSON.stringify(credentials))
+    new TextEncoder().encode(JSON.stringify(credentials)) // OAuth 2.0 credentials object
   );
   
   return JSON.stringify({
@@ -67,79 +76,269 @@ export async function decryptCredentials(encryptedData, env) {
     new Uint8Array(data.encrypted)
   );
   
-  return JSON.parse(new TextDecoder().decode(decrypted));
+  return JSON.parse(new TextDecoder().decode(decrypted)); // Return parsed credentials object
 }
 
-// === OAUTH 1.0A FUNCTIONS ===
+// === OAUTH 2.0 AUTHORIZATION CODE FLOW ===
 
-function generateNonce() {
-  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+export function generateAuthorizationUrl(clientId) {
+  const baseUrl = 'https://twitter.com/i/oauth2/authorize';
+  const redirectUri = 'https://fcc-monitor.fcc-monitor-11-42.workers.dev/api/oauth/callback';
+  const scopes = 'tweet.read tweet.write users.read';
+  const state = Math.random().toString(36).substring(2, 15);
+  
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope: scopes,
+    state: state,
+    code_challenge: 'challenge', // PKCE - using static for simplicity
+    code_challenge_method: 'plain'
+  });
+  
+  return `${baseUrl}?${params.toString()}`;
 }
 
-function percentEncode(str) {
-  return encodeURIComponent(str)
-    .replace(/!/g, '%21')
-    .replace(/'/g, '%27')
-    .replace(/\(/g, '%28')
-    .replace(/\)/g, '%29')
-    .replace(/\*/g, '%2A');
+export async function exchangeCodeForToken(authCode, env) {
+  try {
+    const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
+    if (!encryptedCreds) {
+      throw new Error('OAuth 2.0 credentials not configured');
+    }
+
+    const credentials = await decryptCredentials(encryptedCreds, env);
+    const redirectUri = 'https://fcc-monitor.fcc-monitor-11-42.workers.dev/api/oauth/callback';
+    
+    const response = await fetch('https://api.twitter.com/2/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${btoa(`${credentials.clientId}:${credentials.clientSecret}`)}`
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: authCode,
+        redirect_uri: redirectUri,
+        code_verifier: 'challenge'
+      }).toString()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Token exchange failed: ${response.status} ${errorText}`);
+    }
+
+    const tokenData = await response.json();
+    logMessage(`Successfully obtained OAuth 2.0 access token via authorization code`);
+    
+    // Store the access token (and refresh token if provided)
+    const tokenInfo = {
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_at: Date.now() + (tokenData.expires_in * 1000) - 60000, // 1 minute buffer
+      token_type: tokenData.token_type
+    };
+    
+    await env.FCC_MONITOR_KV.put('x_oauth_token', JSON.stringify(tokenInfo), {
+      expirationTtl: tokenData.expires_in - 60
+    });
+
+    return tokenInfo;
+  } catch (error) {
+    logMessage(`OAuth 2.0 code exchange failed: ${error.message}`);
+    throw error;
+  }
 }
 
-async function generateSignature(method, url, params, consumerSecret, tokenSecret) {
-  // Sort parameters
-  const sortedParams = Object.keys(params)
-    .sort()
-    .map(key => `${percentEncode(key)}=${percentEncode(params[key])}`)
-    .join('&');
-  
-  // Create signature base string
-  const signatureBaseString = [
-    method.toUpperCase(),
-    percentEncode(url),
-    percentEncode(sortedParams)
-  ].join('&');
-  
-  // Create signing key
-  const signingKey = `${percentEncode(consumerSecret)}&${percentEncode(tokenSecret)}`;
-  
-  // Generate HMAC-SHA1 signature
-  const keyData = new TextEncoder().encode(signingKey);
-  const key = await crypto.subtle.importKey(
-    'raw',
-    keyData,
-    { name: 'HMAC', hash: 'SHA-1' },
-    false,
-    ['sign']
-  );
-  
-  const signature = await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(signatureBaseString)
-  );
-  
-  // Convert to base64
-  const base64 = btoa(String.fromCharCode(...new Uint8Array(signature)));
-  return base64;
+export async function getCachedOrNewAccessToken(env) {
+  try {
+    // Check for cached token from authorization flow
+    const cachedToken = await env.FCC_MONITOR_KV.get('x_oauth_token');
+    if (cachedToken) {
+      const tokenData = JSON.parse(cachedToken);
+      if (Date.now() < tokenData.expires_at) {
+        logMessage('Using cached OAuth 2.0 access token from authorization');
+        return tokenData.access_token;
+      }
+      
+      // Try to refresh the token if we have a refresh token
+      if (tokenData.refresh_token) {
+        logMessage('Access token expired, attempting to refresh...');
+        try {
+          return await refreshAccessToken(tokenData.refresh_token, env);
+        } catch (refreshError) {
+          logMessage(`Token refresh failed: ${refreshError.message}`);
+          // Fall through to request new authorization
+        }
+      }
+    }
+
+    // No valid token found - user needs to authorize
+    throw new Error('No valid access token found. Please authorize with X first using the "🔗 Authorize with X" button.');
+  } catch (error) {
+    logMessage(`Failed to get OAuth 2.0 access token: ${error.message}`);
+    throw error;
+  }
 }
 
-function generateAuthHeader(credentials, method, url, additionalParams = {}) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  const nonce = generateNonce();
-  
-  const oauthParams = {
-    oauth_consumer_key: credentials.apiKey,
-    oauth_nonce: nonce,
-    oauth_signature_method: 'HMAC-SHA1',
-    oauth_timestamp: timestamp,
-    oauth_token: credentials.accessToken,
-    oauth_version: '1.0'
-  };
-  
-  // Combine oauth and additional params for signature
-  const allParams = { ...oauthParams, ...additionalParams };
-  
-  return { oauthParams, allParams, timestamp, nonce };
+export async function refreshAccessToken(refreshToken, env) {
+  try {
+    const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
+    if (!encryptedCreds) {
+      throw new Error('OAuth 2.0 credentials not configured');
+    }
+
+    const credentials = await decryptCredentials(encryptedCreds, env);
+    
+    const response = await fetch('https://api.twitter.com/2/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${btoa(`${credentials.clientId}:${credentials.clientSecret}`)}`
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken
+      }).toString()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Token refresh failed: ${response.status} ${errorText}`);
+    }
+
+    const tokenData = await response.json();
+    logMessage(`Successfully refreshed OAuth 2.0 access token`);
+    
+    // Store the new access token
+    const tokenInfo = {
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token || refreshToken, // Keep old refresh token if new one not provided
+      expires_at: Date.now() + (tokenData.expires_in * 1000) - 60000, // 1 minute buffer
+      token_type: tokenData.token_type
+    };
+    
+    await env.FCC_MONITOR_KV.put('x_oauth_token', JSON.stringify(tokenInfo), {
+      expirationTtl: tokenData.expires_in - 60
+    });
+
+    return tokenInfo.access_token;
+  } catch (error) {
+    logMessage(`OAuth 2.0 token refresh failed: ${error.message}`);
+    throw error;
+  }
+}
+
+export async function validateBearerToken(token, env) {
+  try {
+    const response = await fetch('https://api.twitter.com/2/users/me', {
+      headers: { 
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    return response.ok;
+  } catch (error) {
+    logMessage(`Bearer token validation failed: ${error.message}`);
+    return false;
+  }
+}
+
+export async function validateBearerTokenDetailed(env) {
+  try {
+    const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
+    if (!encryptedCreds) {
+      return {
+        success: false,
+        error: 'No OAuth 2.0 credentials found in storage',
+        details: 'Please save your Client ID and Client Secret first'
+      };
+    }
+
+    const credentials = await decryptCredentials(encryptedCreds, env);
+    
+    // Validate credential format
+    if (!credentials.clientId || !credentials.clientSecret) {
+      return {
+        success: false,
+        error: 'Invalid OAuth 2.0 credentials format',
+        details: 'Missing Client ID or Client Secret'
+      };
+    }
+
+    logMessage(`Testing OAuth 2.0 credentials: ${credentials.clientId}...`);
+
+    // Try to get an access token
+    try {
+      const accessToken = await getOAuth2AccessToken(credentials, env);
+      
+      // Test the access token with a simple API call
+      const response = await fetch('https://api.twitter.com/2/tweets', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: '[TEST] OAuth 2.0 validation test - please ignore'
+        })
+      });
+
+      const responseText = await response.text();
+      logMessage(`X API validation response: ${response.status} ${response.statusText}`);
+      logMessage(`X API response body: ${responseText}`);
+
+      if (response.ok) {
+        // Delete the test tweet if it was posted
+        const result = JSON.parse(responseText);
+        if (result.data?.id) {
+          // Attempt to delete the test tweet
+          await fetch(`https://api.twitter.com/2/tweets/${result.data.id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          }).catch(() => {}); // Ignore delete errors
+        }
+
+        return {
+          success: true,
+          message: 'OAuth 2.0 credentials are valid and working',
+          details: `Successfully authenticated with Client ID: ${credentials.clientId}`,
+          clientId: credentials.clientId
+        };
+      } else {
+        let errorDetails = 'Unknown error';
+        try {
+          const errorData = JSON.parse(responseText);
+          errorDetails = errorData.detail || errorData.title || errorData.errors?.[0]?.message || responseText;
+        } catch (e) {
+          errorDetails = responseText || `HTTP ${response.status}`;
+        }
+
+        return {
+          success: false,
+          error: `X API error: ${response.status} ${response.statusText}`,
+          details: errorDetails,
+          clientId: credentials.clientId,
+          httpStatus: response.status
+        };
+      }
+    } catch (tokenError) {
+      return {
+        success: false,
+        error: 'Failed to get OAuth 2.0 access token',
+        details: tokenError.message,
+        clientId: credentials.clientId
+      };
+    }
+  } catch (error) {
+    logMessage(`OAuth 2.0 validation error: ${error.message}`);
+    return {
+      success: false,
+      error: 'OAuth 2.0 validation failed',
+      details: error.message
+    };
+  }
 }
 
 // === RATE LIMITING FUNCTIONS ===
@@ -255,20 +454,6 @@ export async function processRetryQueue(env) {
 
 // === CORE X POSTING FUNCTIONS ===
 
-export function getDefaultXTemplate() {
-  return DEFAULT_X_TEMPLATE;
-}
-
-export async function getXTemplateFromKV(env) {
-  try {
-    const template = await env.FCC_MONITOR_KV.get('x_template');
-    return template || DEFAULT_X_TEMPLATE;
-  } catch (error) {
-    console.error('Error reading X template from KV:', error);
-    return DEFAULT_X_TEMPLATE;
-  }
-}
-
 function formatForX(filing, template) {
   // Apply the template
   let tweetText = applyTemplate(template, filing);
@@ -308,72 +493,60 @@ function formatForX(filing, template) {
 }
 
 async function postSingleTweet(filing, env, customTemplate = null) {
-  const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
-  if (!encryptedCreds) {
-    throw new Error('X credentials not configured');
-  }
-
-  const credentials = await decryptCredentials(encryptedCreds, env);
-  const template = customTemplate || await getXTemplateFromKV(env);
-  
-  const tweetText = formatForX(filing, template);
-  
-  logMessage(`Posting to X: ${tweetText.substring(0, 50)}...`);
-
-  const url = `${X_API_BASE}/tweets`;
-  const method = 'POST';
-  
-  // Generate OAuth 1.0a authentication
-  const { oauthParams, allParams } = generateAuthHeader(credentials, method, url);
-  
-  // Generate signature
-  const signature = await generateSignature(method, url, allParams, credentials.apiSecret, credentials.accessTokenSecret);
-  
-  // Build Authorization header
-  const authParams = {
-    ...oauthParams,
-    oauth_signature: signature
-  };
-  
-  const authHeader = 'OAuth ' + Object.keys(authParams)
-    .sort()
-    .map(key => `${percentEncode(key)}="${percentEncode(authParams[key])}"`)
-    .join(', ');
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': authHeader,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      text: tweetText
-    })
-  });
-
-  // Update rate limits from response headers
-  await updateRateLimit(response.headers, env);
-
-  if (!response.ok) {
-    const error = await response.text();
+  try {
+    console.log(`[${new Date().toISOString()}] Posting to X: ${formatForX(filing, customTemplate || await getXTemplateFromKV(env)).substring(0, 50)}...`);
     
-    // Handle specific error cases
-    if (response.status === 401) {
-      throw new Error('X API authentication failed - check your API keys and tokens');
-    } else if (response.status === 403) {
-      throw new Error('X API forbidden - check your app permissions and authentication');
-    } else if (response.status === 429) {
-      throw new Error('X API rate limit exceeded');
-    } else if (response.status >= 500) {
-      throw new Error('X API server error - service temporarily unavailable');
-    } else {
-      throw new Error(`X API error ${response.status}: ${error}`);
+    const accessToken = await getCachedOrNewAccessToken(env);
+    if (!accessToken) {
+      throw new Error('No valid access token available');
     }
-  }
 
-  const result = await response.json();
-  logMessage(`Successfully posted to X: Tweet ID ${result.data?.id}`);
-  return result;
+    const response = await fetch('https://api.twitter.com/2/tweets', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: formatForX(filing, customTemplate || await getXTemplateFromKV(env))
+      })
+    });
+
+    // Enhanced error logging
+    if (!response.ok) {
+      const errorBody = await response.text();
+      const errorDetails = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: errorBody
+      };
+      
+      console.error(`[${new Date().toISOString()}] X API Error Details:`, JSON.stringify(errorDetails, null, 2));
+      
+      if (response.status === 403) {
+        throw new Error(`X API forbidden - check your app permissions for posting tweets. Full error: ${errorBody}`);
+      } else if (response.status === 401) {
+        throw new Error(`X API unauthorized - token may be invalid or expired. Full error: ${errorBody}`);
+      } else {
+        throw new Error(`X API error (${response.status}): ${errorBody}`);
+      }
+    }
+
+    const result = await response.json();
+    console.log(`[${new Date().toISOString()}] Successfully posted tweet:`, result.data?.id);
+
+    // Update rate limit info
+    const remaining = response.headers.get('x-rate-limit-remaining');
+    if (remaining) {
+      console.log(`[${new Date().toISOString()}] Updated X rate limit remaining: ${remaining}`);
+    }
+
+    return result;
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Error posting to X:`, error.message);
+    throw error;
+  }
 }
 
 export async function sendToX(filings, env, customTemplate = null) {
@@ -473,14 +646,15 @@ export async function sendToX(filings, env, customTemplate = null) {
 // === TEST FUNCTION ===
 
 export async function testXPost(env, customTemplate = null) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const sampleFiling = {
-    id: 'test123',
+    id: `test-${timestamp}`,
     docket_number: '11-42',
     filing_type: 'TEST',
-    title: '[TEST] Sample FCC Filing for X Integration',
+    title: `[TEST] Sample FCC Filing for X Integration ${timestamp}`,
     author: 'FCC Monitor Test System',
     date_received: new Date().toISOString().split('T')[0],
-    filing_url: 'https://www.fcc.gov/ecfs/search/search-filings/filing/test123'
+    filing_url: `https://www.fcc.gov/ecfs/search/search-filings/filing/test-${timestamp}`
   };
 
   try {
@@ -488,10 +662,19 @@ export async function testXPost(env, customTemplate = null) {
     return { 
       success: true, 
       tweetId: result.data?.id,
-      message: 'Test tweet posted successfully',
+      message: 'Test tweet posted successfully with Bearer token',
       preview: formatForX(sampleFiling, customTemplate || await getXTemplateFromKV(env))
     };
   } catch (error) {
+    // UPDATE error message to reference Bearer token
+    if (error.message.includes('authentication failed')) {
+      return { 
+        success: false, 
+        error: 'Bearer token authentication failed - check your token is valid',
+        preview: formatForX(sampleFiling, customTemplate || await getXTemplateFromKV(env))
+      };
+    }
+    
     return { 
       success: false, 
       error: error.message,
