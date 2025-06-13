@@ -1,6 +1,8 @@
 import { fetchECFSFilings } from './ecfs-api.js';
 import { sendToSlack } from './slack.js';
 import { logMessage } from './utils.js';
+import { getDashboardHTML } from './dashboard.js';
+import { getDefaultTemplate, applyTemplate, getSampleFiling } from './slack.js';
 
 export default {
   async scheduled(event, env, ctx) {
@@ -8,6 +10,122 @@ export default {
   },
 
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    
+    // Dashboard route
+    if (url.pathname === '/dashboard') {
+      return new Response(getDashboardHTML(), {
+        headers: { 'Content-Type': 'text/html' }
+      });
+    }
+    
+    // Configuration API endpoints
+    if (url.pathname === '/api/config') {
+      if (request.method === 'GET') {
+        try {
+          const template = await env.FCC_MONITOR_KV.get('dashboard_template');
+          return new Response(JSON.stringify({ 
+            template: template || getDefaultTemplate() 
+          }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: error.message }), { 
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+      
+      if (request.method === 'POST') {
+        try {
+          const { template } = await request.json();
+          await env.FCC_MONITOR_KV.put('dashboard_template', template);
+          return new Response(JSON.stringify({ success: true }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: error.message }), { 
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+    }
+    
+    // Test API endpoint
+    if (url.pathname === '/api/test' && request.method === 'POST') {
+      try {
+        const { template } = await request.json();
+        const sampleFiling = getSampleFiling();
+        const result = applyTemplate(template, sampleFiling);
+        return new Response(JSON.stringify({ 
+          preview: result, 
+          filing: sampleFiling 
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: error.message }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+    
+    // Test and send to Slack API endpoint
+    if (url.pathname === '/api/test-send' && request.method === 'POST') {
+      try {
+        console.log('--- ENTERING /api/test-send ---');
+        console.log('env object keys:', Object.keys(env));
+        if (env.SLACK_WEBHOOK_URL) {
+            console.log('Webhook URL in /api/test-send: SET');
+        } else {
+            console.log('Webhook URL in /api/test-send: NOT SET');
+        }
+
+        const { template } = await request.json();
+        const sampleFiling = getSampleFiling();
+        
+        // Debug: Check if webhook URL is accessible
+        console.log('Webhook URL available:', !!env.SLACK_WEBHOOK_URL);
+        console.log('Webhook URL value:', env.SLACK_WEBHOOK_URL ? 'SET' : 'NOT SET');
+        
+        // Create a modified sample filing with [TEST] prefix in the title
+        const testFiling = {
+          ...sampleFiling,
+          title: `[TEST] ${sampleFiling.title}`
+        };
+        
+        // Debug: Try calling sendToSlack the same way as the working endpoint
+        console.log('About to call sendToSlack without custom template');
+        await sendToSlack([testFiling], env);
+        console.log('sendToSlack completed successfully');
+        
+        // Generate preview with the custom template for display
+        const testTemplate = `[TEST] ${template}`;
+        const result = applyTemplate(testTemplate, sampleFiling);
+        
+        return new Response(JSON.stringify({ 
+          success: true,
+          preview: result,
+          message: 'Test message sent to Slack'
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        console.error('Test-send error:', error.message);
+        console.error('Test-send stack:', error.stack);
+        return new Response(JSON.stringify({ 
+          success: false,
+          error: error.message 
+        }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+    
     // Handle manual triggers or testing
     if (request.method === 'POST') {
       const result = await handleScheduled(env);
@@ -22,6 +140,13 @@ export default {
 
 async function handleScheduled(env) {
   try {
+    console.log('--- ENTERING handleScheduled ---');
+    console.log('env object keys:', Object.keys(env));
+     if (env.SLACK_WEBHOOK_URL) {
+        console.log('Webhook URL in handleScheduled: SET');
+    } else {
+        console.log('Webhook URL in handleScheduled: NOT SET');
+    }
     logMessage('Starting FCC monitoring check...');
     
     // Fetch filings from the last 2 hours for docket 11-42
