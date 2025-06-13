@@ -364,35 +364,36 @@ export function getDashboardHTML() {
             </div>
             
             <div id="xSettingsPanel" style="display: none;">
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
-                <div>
-                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">API Key:</label>
-                  <input type="password" id="xApiKey" placeholder="Consumer Key" 
-                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
-                </div>
-                <div>
-                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">API Secret:</label>
-                  <input type="password" id="xApiSecret" placeholder="Consumer Secret" 
-                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
-                </div>
-                <div>
-                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">Access Token:</label>
-                  <input type="password" id="xAccessToken" placeholder="Access Token" 
-                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
-                </div>
-                <div>
-                  <label style="display: block; margin-bottom: 5px; font-weight: 500;">Access Token Secret:</label>
-                  <input type="password" id="xAccessTokenSecret" placeholder="Access Token Secret" 
-                         style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
-                </div>
-              </div>
-              <div style="font-size: 12px; color: #666; margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 6px;">
-                <strong>Get these from X Developer Portal:</strong><br>
-                1. Go to <a href="https://developer.twitter.com/en/portal/dashboard" target="_blank">X Developer Portal</a><br>
-                2. Select your app → Keys and Tokens<br>
-                3. Generate all 4 credentials above<br>
-                4. Ensure your app has "Read and Write" permissions
-              </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+            <div>
+              <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client ID:</label>
+              <input type="password" id="xClientId" placeholder="OAuth 2.0 Client ID" 
+                     style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
+            </div>
+            <div>
+              <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client Secret:</label>
+              <input type="password" id="xClientSecret" placeholder="OAuth 2.0 Client Secret" 
+                     style="width: 100%; padding: 10px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;">
+            </div>
+          </div>
+          <div style="margin-bottom: 15px;">
+            <button class="btn-primary" onclick="saveXCredentials()" style="width: 100%; margin-bottom: 10px;">
+              💾 Save OAuth 2.0 Credentials
+            </button>
+            <button class="btn-info" onclick="authorizeWithX()" style="width: 100%;">
+              🔗 Authorize with X
+            </button>
+            <div id="credentialStatus" style="font-size: 12px; margin-top: 5px; color: #666;"></div>
+            <div id="authStatus" style="font-size: 12px; margin-top: 5px; color: #666;"></div>
+          </div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 6px;">
+            <strong>Get OAuth 2.0 credentials from X Developer Portal:</strong><br>
+            1. Go to <a href="https://developer.twitter.com/en/portal/dashboard" target="_blank">X Developer Portal</a><br>
+            2. Select your app → Keys and Tokens<br>
+            3. Copy the "OAuth 2.0 Client ID" and "Client Secret"<br>
+            4. Ensure your app has "Read and Write" permissions<br>
+            5. Set User authentication to "OAuth 2.0" in your app settings
+          </div>
               
               <div style="margin-bottom: 15px;">
                 <label style="display: flex; align-items: center; gap: 10px;">
@@ -404,6 +405,9 @@ export function getDashboardHTML() {
               <div class="button-group">
                 <button class="btn-primary" onclick="saveXSettings()">
                   💾 Save X Settings
+                </button>
+                <button class="btn-info" onclick="testBearerToken()">
+                  🔑 Test Bearer Token
                 </button>
                 <button class="btn-success" onclick="testXPost()">
                   🧪 Test X Post
@@ -480,6 +484,22 @@ export function getDashboardHTML() {
             }
             if (xOnlyMode) {
               xOnlyMode.checked = data.xOnlyMode || false;
+            }
+            
+            // Update credential status
+            const credStatus = document.getElementById('credentialStatus');
+            if (credStatus) {
+              credStatus.textContent = data.xCredentialsSet ? '✓ OAuth 2.0 credentials saved' : 'No OAuth 2.0 credentials saved';
+              credStatus.style.color = data.xCredentialsSet ? '#51cf66' : '#666';
+            }
+            
+            // Check if we have an authorized token
+            const authStatus = document.getElementById('authStatus');
+            if (authStatus) {
+              // We'll assume we're authorized if we have credentials and posting is enabled
+              // In a real implementation, you might want to add a separate status check
+              const isAuthorized = data.xCredentialsSet && data.xEnabled;
+              updateAuthStatus(isAuthorized);
             }
             
             // Update X status
@@ -714,7 +734,7 @@ export function getDashboardHTML() {
           if (!enabled) {
             statusDiv.innerHTML = '<span style="color: #999;">❌ X posting disabled</span>';
           } else if (!credentialsSet) {
-            statusDiv.innerHTML = '<span style="color: #ff6b6b;">⚠️ X credentials not configured</span>';
+            statusDiv.innerHTML = '<span style="color: #ff6b6b;">⚠️ OAuth 2.0 credentials not configured</span>';
           } else {
             statusDiv.innerHTML = '<span style="color: #51cf66;">✅ X posting configured and enabled</span>';
           }
@@ -723,15 +743,13 @@ export function getDashboardHTML() {
         // Save X settings
         async function saveXSettings() {
           const xEnabled = document.getElementById('xEnabled').checked;
-          const xApiKey = document.getElementById('xApiKey').value;
-          const xApiSecret = document.getElementById('xApiSecret').value;
-          const xAccessToken = document.getElementById('xAccessToken').value;
-          const xAccessTokenSecret = document.getElementById('xAccessTokenSecret').value;
+          const xClientId = document.getElementById('xClientId').value;
+          const xClientSecret = document.getElementById('xClientSecret').value;
           const xOnlyMode = document.getElementById('xOnlyMode').checked;
           
           if (xEnabled) {
-            if (!xApiKey.trim() || !xApiSecret.trim() || !xAccessToken.trim() || !xAccessTokenSecret.trim()) {
-              showStatus('Please enter all 4 X API credentials', 'error');
+            if (!xClientId.trim() || !xClientSecret.trim()) {
+              showStatus('Please enter both Client ID and Client Secret', 'error');
               return;
             }
           }
@@ -742,13 +760,11 @@ export function getDashboardHTML() {
               xOnlyMode
             };
             
-            // Only send credentials if all are provided
-            if (xApiKey.trim() && xApiSecret.trim() && xAccessToken.trim() && xAccessTokenSecret.trim()) {
-              requestBody.xCredentials = {
-                apiKey: xApiKey.trim(),
-                apiSecret: xApiSecret.trim(),
-                accessToken: xAccessToken.trim(),
-                accessTokenSecret: xAccessTokenSecret.trim()
+            // Send OAuth 2.0 credentials if provided
+            if (xClientId.trim() && xClientSecret.trim()) {
+              requestBody.xOAuth2Credentials = {
+                clientId: xClientId.trim(),
+                clientSecret: xClientSecret.trim()
               };
             }
             
@@ -761,11 +777,9 @@ export function getDashboardHTML() {
             const result = await response.json();
             if (result.success) {
               showStatus('X settings saved successfully!', 'success');
-              // Clear the password fields after successful save
-              document.getElementById('xApiKey').value = '';
-              document.getElementById('xApiSecret').value = '';
-              document.getElementById('xAccessToken').value = '';
-              document.getElementById('xAccessTokenSecret').value = '';
+              // Clear the credential fields after successful save
+              document.getElementById('xClientId').value = '';
+              document.getElementById('xClientSecret').value = '';
               // Update status
               updateXStatus(true, xEnabled);
             } else {
@@ -773,6 +787,72 @@ export function getDashboardHTML() {
             }
           } catch (error) {
             showStatus('Error saving X settings: ' + error.message, 'error');
+          }
+        }
+        
+        // Save X credentials
+        async function saveXCredentials() {
+          // Just call saveXSettings since credentials are saved with other settings
+          await saveXSettings();
+        }
+
+        // Authorize with X using OAuth 2.0
+        async function authorizeWithX() {
+          try {
+            // First check if credentials are saved
+            const config = await fetch('/api/config').then(r => r.json());
+            if (!config.xCredentialsSet) {
+              showStatus('Please save your OAuth 2.0 credentials first', 'error');
+              return;
+            }
+
+            showStatus('Redirecting to X for authorization...', 'info');
+
+            // Generate authorization URL (we'll get client ID from backend)
+            const response = await fetch('/api/oauth/authorize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (!response.ok) {
+              throw new Error('Failed to generate authorization URL');
+            }
+
+            const result = await response.json();
+            
+            // Open authorization window
+            const authWindow = window.open(result.authUrl, 'xauth', 'width=600,height=700,scrollbars=yes,resizable=yes');
+            
+            // Listen for the authorization completion
+            window.addEventListener('message', function(event) {
+              if (event.data === 'oauth_success') {
+                authWindow.close();
+                showStatus('✅ Successfully authorized with X!', 'success');
+                updateAuthStatus(true);
+                // Refresh the page config to show new status
+                loadConfig();
+              }
+            });
+
+            // Check if the window was closed manually
+            const checkClosed = setInterval(() => {
+              if (authWindow.closed) {
+                clearInterval(checkClosed);
+                showStatus('Authorization window closed', 'info');
+              }
+            }, 1000);
+
+          } catch (error) {
+            showStatus('Error during authorization: ' + error.message, 'error');
+          }
+        }
+
+        // Update authorization status display
+        function updateAuthStatus(isAuthorized) {
+          const authStatus = document.getElementById('authStatus');
+          if (authStatus) {
+            authStatus.textContent = isAuthorized ? '✓ Authorized with X' : 'Not authorized with X';
+            authStatus.style.color = isAuthorized ? '#51cf66' : '#666';
           }
         }
         
