@@ -336,6 +336,19 @@ export function getDashboardHTML() {
             </div>
           </div>
           
+          <div class="panel">
+            <h2>⏱️ Check Frequency</h2>
+            <select id="frequencySelect" style="width: 100%; padding: 12px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px; margin-bottom: 20px;">
+              <option value="30">Every 30 minutes</option>
+              <option value="60">Every 1 hour</option>
+              <option value="360">Every 6 hours</option>
+              <option value="720">Every 12 hours</option>
+            </select>
+            <button class="btn-primary" style="width: 100%;" onclick="saveFrequency()">
+              💾 Save Frequency
+            </button>
+          </div>
+          
           <div class="panel actions-panel">
             <h2>⚡ Quick Actions</h2>
             <div class="button-group">
@@ -387,6 +400,11 @@ export function getDashboardHTML() {
             const data = await response.json();
             currentTemplate = data.template || '';
             document.getElementById('template').value = currentTemplate;
+            // Set current frequency selection
+            const freqSelect = document.getElementById('frequencySelect');
+            if (freqSelect && data.frequency) {
+              freqSelect.value = data.frequency.toString();
+            }
             updateCharCount();
             updatePreview();
           } catch (error) {
@@ -445,6 +463,26 @@ export function getDashboardHTML() {
             }
           } catch (error) {
             showStatus('Error saving template: ' + error.message, 'error');
+          }
+        }
+
+        // Save frequency setting
+        async function saveFrequency() {
+          const freq = document.getElementById('frequencySelect').value;
+          try {
+            const response = await fetch('/api/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ frequency: parseInt(freq, 10) })
+            });
+            const result = await response.json();
+            if (result.success) {
+              showStatus('Frequency updated successfully!', 'success');
+            } else {
+              showStatus('Error saving frequency: ' + result.error, 'error');
+            }
+          } catch (error) {
+            showStatus('Error saving frequency: ' + error.message, 'error');
           }
         }
 

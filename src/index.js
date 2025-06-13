@@ -24,8 +24,11 @@ export default {
       if (request.method === 'GET') {
         try {
           const template = await env.FCC_MONITOR_KV.get('dashboard_template');
+          const freqStr = await env.FCC_MONITOR_KV.get('monitor_frequency_minutes');
+          const frequency = freqStr ? parseInt(freqStr, 10) : 60;
           return new Response(JSON.stringify({ 
-            template: template || getDefaultTemplate() 
+            template: template || getDefaultTemplate(),
+            frequency 
           }), {
             headers: { 'Content-Type': 'application/json' }
           });
@@ -39,8 +42,15 @@ export default {
       
       if (request.method === 'POST') {
         try {
-          const { template } = await request.json();
-          await env.FCC_MONITOR_KV.put('dashboard_template', template);
+          const { template, frequency } = await request.json();
+
+          if (template !== undefined) {
+            await env.FCC_MONITOR_KV.put('dashboard_template', template);
+          }
+
+          if (frequency !== undefined) {
+            await env.FCC_MONITOR_KV.put('monitor_frequency_minutes', frequency.toString());
+          }
           return new Response(JSON.stringify({ success: true }), {
             headers: { 'Content-Type': 'application/json' }
           });
@@ -149,6 +159,22 @@ async function handleScheduled(env) {
     }
     logMessage('Starting FCC monitoring check...');
     
+    // Throttle logic based on configurable frequency
+    const freqStr = await env.FCC_MONITOR_KV.get('monitor_frequency_minutes');
+    const frequencyMinutes = freqStr ? parseInt(freqStr, 10) : 60; // default 60 min
+    const lastRunStr = await env.FCC_MONITOR_KV.get('last_run_ts');
+    const now = Date.now();
+    if (lastRunStr && (now - parseInt(lastRunStr, 10)) < frequencyMinutes * 60 * 1000) {
+      const minsLeft = Math.ceil((frequencyMinutes * 60 * 1000 - (now - parseInt(lastRunStr, 10))) / 60000);
+      logMessage(`Skipping run – next check in ~${minsLeft} minutes (frequency ${frequencyMinutes}m)`);
+      return {
+        success: true,
+        skipped: true,
+        message: `Skipped run - next check in ${minsLeft} minutes`,
+        frequencyMinutes
+      };
+    }
+    
     // Fetch filings from the last 2 hours for docket 11-42
     const docketNumber = '11-42';
     const allFilings = await fetchECFSFilings(docketNumber, env);
@@ -186,6 +212,9 @@ async function handleScheduled(env) {
           )
         );
         
+        // Update last run timestamp
+        await env.FCC_MONITOR_KV.put('last_run_ts', now.toString());
+        
         return {
           success: true,
           message: `Processed ${filingsToProcess.length} new filings (${allFilings.length} total found)`,
@@ -193,6 +222,8 @@ async function handleScheduled(env) {
         };
       } else {
         logMessage(`All ${allFilings.length} filings have already been processed`);
+        // Update last run timestamp even if nothing new
+        await env.FCC_MONITOR_KV.put('last_run_ts', now.toString());
         return {
           success: true,
           message: 'No new filings to process (all already sent)',
@@ -201,6 +232,8 @@ async function handleScheduled(env) {
       }
     } else {
       logMessage(`No filings found for docket ${docketNumber}`);
+      // Update last run timestamp when no filings at all
+      await env.FCC_MONITOR_KV.put('last_run_ts', now.toString());
       return {
         success: true,
         message: 'No filings found in time range',
