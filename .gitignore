@@ -23,4 +23,8 @@ yarn-error.log*
 .vscode/
 *.swp
 *.swo
-.DS_Store 
+.DS_Store
+
+# Documentation with sensitive information
+ARCHITECTURE.md
+PROJECT_OVERVIEW.md 
