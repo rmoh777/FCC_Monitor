@@ -114,9 +114,25 @@ export default {
       }
     }
     
-    // Test X posting endpoint
+    // Test X posting endpoint - ENHANCED with rate limiting
     if (url.pathname === '/api/test-x' && request.method === 'POST') {
       try {
+        // Check rate limiting - prevent posts within 1 minute
+        const lastTestPost = await env.FCC_MONITOR_KV.get('x_last_test_post');
+        const now = Date.now();
+
+        if (lastTestPost && (now - parseInt(lastTestPost) < 60000)) {
+          const secondsLeft = Math.ceil((60000 - (now - parseInt(lastTestPost))) / 1000);
+          return new Response(JSON.stringify({
+            success: false,
+            error: `Please wait ${secondsLeft} more seconds before testing again to avoid rate limits`,
+            rateLimited: true
+          }), {
+            status: 429,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
         let template = null;
         try {
           const body = await request.json();
@@ -124,7 +140,15 @@ export default {
         } catch (e) {
           // No JSON body provided, use default template
         }
+        
+        const { testXPost } = await import('./x-integration.js');
         const result = await testXPost(env, template);
+        
+        // Record this test post time only if successful
+        if (result.success) {
+          await env.FCC_MONITOR_KV.put('x_last_test_post', now.toString());
+        }
+        
         return new Response(JSON.stringify(result), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -324,11 +348,86 @@ export default {
       }
     }
 
-    // Test Bearer token validation endpoint
+    // Cached validation endpoint - NEW
+    if (url.pathname === '/api/cached-validation' && request.method === 'GET') {
+      try {
+        const cachedValidation = await env.FCC_MONITOR_KV.get('x_credentials_validation');
+        
+        if (cachedValidation) {
+          const validationData = JSON.parse(cachedValidation);
+          const now = Date.now();
+          
+          // Check if cached result is less than 5 minutes old
+          if (now - validationData.timestamp < 300000) { // 5 minutes
+            return new Response(JSON.stringify({
+              success: validationData.success,
+              cached: true,
+              timestamp: validationData.timestamp,
+              message: 'Using cached validation result',
+              details: validationData.details,
+              clientId: validationData.clientId
+            }), {
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+        }
+        
+        // No valid cached result
+        return new Response(JSON.stringify({
+          success: false,
+          cached: false,
+          message: 'No recent cached validation result'
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          success: false,
+          error: error.message 
+        }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // Test Bearer token validation endpoint - ENHANCED with caching
     if (url.pathname === '/api/test-bearer-token' && request.method === 'POST') {
       try {
+        // Check cached validation first
+        const cachedValidation = await env.FCC_MONITOR_KV.get('x_credentials_validation');
+        
+        if (cachedValidation) {
+          const validationData = JSON.parse(cachedValidation);
+          const now = Date.now();
+          
+          // Use cached result if less than 5 minutes old
+          if (now - validationData.timestamp < 300000) { // 5 minutes
+            return new Response(JSON.stringify({
+              ...validationData,
+              cached: true,
+              message: 'Using cached validation result (no API calls made)'
+            }), {
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+        }
+        
+        // No valid cache, perform actual validation
         const { validateBearerTokenDetailed } = await import('./x-integration.js');
         const result = await validateBearerTokenDetailed(env);
+        
+        // Cache successful validation results
+        if (result.success) {
+          await env.FCC_MONITOR_KV.put('x_credentials_validation', JSON.stringify({
+            success: true,
+            timestamp: Date.now(),
+            message: result.message,
+            details: result.details,
+            clientId: result.clientId
+          }), { expirationTtl: 300 }); // 5 minutes
+        }
+        
         return new Response(JSON.stringify(result), {
           headers: { 'Content-Type': 'application/json' }
         });
