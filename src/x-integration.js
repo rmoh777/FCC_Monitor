@@ -153,29 +153,64 @@ export async function exchangeCodeForToken(authCode, env) {
 
 export async function getCachedOrNewAccessToken(env) {
   try {
-    // Check for cached token from authorization flow
+    // Check for cached access token first
     const cachedToken = await env.FCC_MONITOR_KV.get('x_oauth_token');
     if (cachedToken) {
-      const tokenData = JSON.parse(cachedToken);
-      if (Date.now() < tokenData.expires_at) {
-        logMessage('Using cached OAuth 2.0 access token from authorization');
-        return tokenData.access_token;
-      }
-      
-      // Try to refresh the token if we have a refresh token
-      if (tokenData.refresh_token) {
-        logMessage('Access token expired, attempting to refresh...');
-        try {
-          return await refreshAccessToken(tokenData.refresh_token, env);
-        } catch (refreshError) {
-          logMessage(`Token refresh failed: ${refreshError.message}`);
-          // Fall through to request new authorization
+      try {
+        const tokenData = JSON.parse(cachedToken);
+        
+        // Check if token is still valid (with 5-minute buffer)
+        const expiresAt = tokenData.expires_at;
+        const now = Date.now();
+        const bufferTime = 5 * 60 * 1000; // 5 minutes
+        
+        if (expiresAt && now < (expiresAt - bufferTime)) {
+          logMessage(`Using cached OAuth 2.0 access token (expires in ${Math.round((expiresAt - now) / 60000)} minutes)`);
+          return tokenData.access_token;
         }
+        
+        // Token expired or expiring soon, try to refresh
+        if (tokenData.refresh_token) {
+          logMessage(`Access token expired/expiring, attempting refresh...`);
+          try {
+            const newAccessToken = await refreshAccessToken(tokenData.refresh_token, env);
+            return newAccessToken;
+          } catch (refreshError) {
+            logMessage(`Token refresh failed: ${refreshError.message}`);
+            // Fall through to get new token
+          }
+        }
+      } catch (parseError) {
+        logMessage(`Failed to parse cached token: ${parseError.message}`);
       }
     }
 
-    // No valid token found - user needs to authorize
-    throw new Error('No valid access token found. Please authorize with X first using the "🔗 Authorize with X" button.');
+    // No valid cached token, need to get credentials and generate new token
+    const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
+    if (!encryptedCreds) {
+      throw new Error('OAuth 2.0 credentials not configured');
+    }
+
+    const credentials = await decryptCredentials(encryptedCreds, env);
+    
+    // Add rate limit check before making OAuth calls
+    const lastOAuthCall = await env.FCC_MONITOR_KV.get('x_last_oauth_call');
+    const now = Date.now();
+    if (lastOAuthCall) {
+      const timeSinceLastCall = now - parseInt(lastOAuthCall);
+      const minInterval = 2000; // 2 seconds minimum between OAuth calls
+      if (timeSinceLastCall < minInterval) {
+        const waitTime = minInterval - timeSinceLastCall;
+        logMessage(`Rate limiting OAuth calls, waiting ${waitTime}ms...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
+    
+    // Record this OAuth call
+    await env.FCC_MONITOR_KV.put('x_last_oauth_call', now.toString());
+    
+    return await getOAuth2AccessToken(credentials, env);
+    
   } catch (error) {
     logMessage(`Failed to get OAuth 2.0 access token: ${error.message}`);
     throw error;
