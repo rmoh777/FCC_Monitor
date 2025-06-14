@@ -659,16 +659,43 @@ async function postSingleTweet(filing, env, customTemplate = null) {
     // Enhanced error logging
     if (!response.ok) {
       const errorBody = await response.text();
+      
+      // Capture rate limit headers for debugging
+      const rateLimitHeaders = {
+        'x-rate-limit-limit': response.headers.get('x-rate-limit-limit'),
+        'x-rate-limit-remaining': response.headers.get('x-rate-limit-remaining'),
+        'x-rate-limit-reset': response.headers.get('x-rate-limit-reset'),
+        'x-rate-limit-resource': response.headers.get('x-rate-limit-resource'),
+      };
+      
       const errorDetails = {
         status: response.status,
         statusText: response.statusText,
         headers: Object.fromEntries(response.headers.entries()),
-        body: errorBody
+        body: errorBody,
+        rateLimitHeaders
       };
       
       console.error(`[${new Date().toISOString()}] X API Error Details:`, JSON.stringify(errorDetails, null, 2));
       
-      if (response.status === 403) {
+      // Special handling for 429 rate limit errors
+      if (response.status === 429) {
+        const resetTimestamp = rateLimitHeaders['x-rate-limit-reset'];
+        const resetTime = resetTimestamp ? new Date(parseInt(resetTimestamp) * 1000) : null;
+        const minutesUntilReset = resetTime ? Math.ceil((resetTime.getTime() - Date.now()) / 60000) : null;
+        
+        console.error(`[${new Date().toISOString()}] RATE LIMIT HIT:`, {
+          endpoint: 'POST /2/tweets',
+          limit: rateLimitHeaders['x-rate-limit-limit'],
+          remaining: rateLimitHeaders['x-rate-limit-remaining'],
+          resetTime: resetTime ? resetTime.toISOString() : 'unknown',
+          minutesUntilReset,
+          resource: rateLimitHeaders['x-rate-limit-resource']
+        });
+        
+        const resetInfo = resetTime ? ` Rate limit resets at ${resetTime.toISOString()} (in ${minutesUntilReset} minutes)` : '';
+        throw new Error(`X API rate limit exceeded for tweet posting.${resetInfo} Full error: ${errorBody}`);
+      } else if (response.status === 403) {
         throw new Error(`X API forbidden - check your app permissions for posting tweets. Full error: ${errorBody}`);
       } else if (response.status === 401) {
         throw new Error(`X API unauthorized - token may be invalid or expired. Full error: ${errorBody}`);
