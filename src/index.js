@@ -348,6 +348,154 @@ export default {
       }
     }
 
+    // Detailed rate limit headers inspection endpoint - NEW
+    if (url.pathname === '/api/rate-limit-headers' && request.method === 'GET') {
+      try {
+        const { getCachedOrNewAccessToken } = await import('./x-integration.js');
+        
+        // Get access token
+        const accessToken = await getCachedOrNewAccessToken(env);
+        if (!accessToken) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'No valid access token available'
+          }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Make a lightweight API call to get current rate limit headers
+        const response = await fetch('https://api.twitter.com/2/users/me', {
+          headers: { 
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        // Extract all rate limit headers
+        const rateLimitHeaders = {
+          'x-rate-limit-limit': response.headers.get('x-rate-limit-limit'),
+          'x-rate-limit-remaining': response.headers.get('x-rate-limit-remaining'),
+          'x-rate-limit-reset': response.headers.get('x-rate-limit-reset'),
+          'x-rate-limit-resource': response.headers.get('x-rate-limit-resource'),
+        };
+
+        // Calculate human-readable reset time
+        const resetTimestamp = rateLimitHeaders['x-rate-limit-reset'];
+        const resetTime = resetTimestamp ? new Date(parseInt(resetTimestamp) * 1000) : null;
+        const minutesUntilReset = resetTime ? Math.ceil((resetTime.getTime() - Date.now()) / 60000) : null;
+
+        return new Response(JSON.stringify({
+          success: true,
+          endpoint: '/users/me (user lookup)',
+          apiResponse: {
+            status: response.status,
+            statusText: response.statusText,
+            ok: response.ok
+          },
+          rateLimitHeaders,
+          parsed: {
+            limit: rateLimitHeaders['x-rate-limit-limit'] ? parseInt(rateLimitHeaders['x-rate-limit-limit']) : null,
+            remaining: rateLimitHeaders['x-rate-limit-remaining'] ? parseInt(rateLimitHeaders['x-rate-limit-remaining']) : null,
+            resetTime: resetTime ? resetTime.toISOString() : null,
+            minutesUntilReset,
+            resource: rateLimitHeaders['x-rate-limit-resource']
+          },
+          timestamp: new Date().toISOString()
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          success: false,
+          error: error.message 
+        }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // Tweet posting rate limit check endpoint - NEW
+    if (url.pathname === '/api/tweet-rate-limit' && request.method === 'GET') {
+      try {
+        const { getCachedOrNewAccessToken } = await import('./x-integration.js');
+        
+        // Get access token
+        const accessToken = await getCachedOrNewAccessToken(env);
+        if (!accessToken) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'No valid access token available'
+          }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Make a test call to the tweet posting endpoint to get its rate limit headers
+        // We'll use a dry-run approach by making a request that will fail validation
+        const response = await fetch('https://api.twitter.com/2/tweets', {
+          method: 'POST',
+          headers: { 
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            text: '' // Empty text will cause validation error but return rate limit headers
+          })
+        });
+
+        // Extract rate limit headers (even from failed requests)
+        const rateLimitHeaders = {
+          'x-rate-limit-limit': response.headers.get('x-rate-limit-limit'),
+          'x-rate-limit-remaining': response.headers.get('x-rate-limit-remaining'),
+          'x-rate-limit-reset': response.headers.get('x-rate-limit-reset'),
+          'x-rate-limit-resource': response.headers.get('x-rate-limit-resource'),
+        };
+
+        // Calculate human-readable reset time
+        const resetTimestamp = rateLimitHeaders['x-rate-limit-reset'];
+        const resetTime = resetTimestamp ? new Date(parseInt(resetTimestamp) * 1000) : null;
+        const minutesUntilReset = resetTime ? Math.ceil((resetTime.getTime() - Date.now()) / 60000) : null;
+
+        const responseBody = await response.text();
+
+        return new Response(JSON.stringify({
+          success: true,
+          endpoint: 'POST /2/tweets (tweet posting)',
+          apiResponse: {
+            status: response.status,
+            statusText: response.statusText,
+            ok: response.ok,
+            body: responseBody
+          },
+          rateLimitHeaders,
+          parsed: {
+            limit: rateLimitHeaders['x-rate-limit-limit'] ? parseInt(rateLimitHeaders['x-rate-limit-limit']) : null,
+            remaining: rateLimitHeaders['x-rate-limit-remaining'] ? parseInt(rateLimitHeaders['x-rate-limit-remaining']) : null,
+            resetTime: resetTime ? resetTime.toISOString() : null,
+            minutesUntilReset,
+            resource: rateLimitHeaders['x-rate-limit-resource']
+          },
+          timestamp: new Date().toISOString()
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          success: false,
+          error: error.message 
+        }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
     // Cached validation endpoint - NEW
     if (url.pathname === '/api/cached-validation' && request.method === 'GET') {
       try {
