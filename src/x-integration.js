@@ -280,7 +280,8 @@ export async function validateBearerToken(token, env) {
   }
 }
 
-export async function validateBearerTokenDetailed(env) {
+// Lightweight OAuth 2.0 validation - NEW (no test tweets)
+export async function validateOAuth2Lightweight(env) {
   try {
     const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
     if (!encryptedCreds) {
@@ -302,11 +303,119 @@ export async function validateBearerTokenDetailed(env) {
       };
     }
 
-    logMessage(`Testing OAuth 2.0 credentials: ${credentials.clientId}...`);
+    logMessage(`Testing OAuth 2.0 credentials (lightweight): ${credentials.clientId}...`);
+
+    // Try to get an access token (this validates credentials)
+    try {
+      const accessToken = await getCachedOrNewAccessToken(env);
+      
+      if (!accessToken) {
+        return {
+          success: false,
+          error: 'Failed to obtain access token',
+          details: 'Could not get valid access token with provided credentials',
+          clientId: credentials.clientId
+        };
+      }
+
+      // Test with a simple read-only API call (no posting)
+      const response = await fetch('https://api.twitter.com/2/users/me', {
+        headers: { 
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const responseText = await response.text();
+      logMessage(`X API lightweight validation response: ${response.status} ${response.statusText}`);
+
+      if (response.ok) {
+        const userData = JSON.parse(responseText);
+        return {
+          success: true,
+          message: 'OAuth 2.0 credentials are valid and working',
+          details: `Successfully authenticated as @${userData.data?.username || 'unknown'} with Client ID: ${credentials.clientId}`,
+          clientId: credentials.clientId,
+          username: userData.data?.username
+        };
+      } else {
+        let errorDetails = 'Unknown error';
+        try {
+          const errorData = JSON.parse(responseText);
+          errorDetails = errorData.detail || errorData.title || errorData.errors?.[0]?.message || responseText;
+        } catch (e) {
+          errorDetails = responseText || `HTTP ${response.status}`;
+        }
+
+        return {
+          success: false,
+          error: `X API error: ${response.status} ${response.statusText}`,
+          details: errorDetails,
+          clientId: credentials.clientId,
+          httpStatus: response.status
+        };
+      }
+    } catch (tokenError) {
+      return {
+        success: false,
+        error: 'Failed to get OAuth 2.0 access token',
+        details: tokenError.message,
+        clientId: credentials.clientId
+      };
+    }
+  } catch (error) {
+    logMessage(`OAuth 2.0 lightweight validation error: ${error.message}`);
+    return {
+      success: false,
+      error: 'OAuth 2.0 validation failed',
+      details: error.message
+    };
+  }
+}
+
+export async function validateBearerTokenDetailed(env) {
+  try {
+    // First try lightweight validation (no test tweets)
+    const lightweightResult = await validateOAuth2Lightweight(env);
+    
+    // If lightweight validation succeeds, return that result
+    // This avoids the expensive test tweet posting
+    if (lightweightResult.success) {
+      return {
+        ...lightweightResult,
+        message: 'OAuth 2.0 credentials validated (lightweight check - no test tweet posted)'
+      };
+    }
+    
+    // Only fall back to full validation if lightweight fails
+    // This preserves the original behavior for edge cases
+    logMessage('Lightweight validation failed, attempting full validation with test tweet...');
+    
+    const encryptedCreds = await env.FCC_MONITOR_KV.get('x_credentials');
+    if (!encryptedCreds) {
+      return {
+        success: false,
+        error: 'No OAuth 2.0 credentials found in storage',
+        details: 'Please save your Client ID and Client Secret first'
+      };
+    }
+
+    const credentials = await decryptCredentials(encryptedCreds, env);
+    
+    // Validate credential format
+    if (!credentials.clientId || !credentials.clientSecret) {
+      return {
+        success: false,
+        error: 'Invalid OAuth 2.0 credentials format',
+        details: 'Missing Client ID or Client Secret'
+      };
+    }
+
+    logMessage(`Testing OAuth 2.0 credentials (full validation): ${credentials.clientId}...`);
 
     // Try to get an access token
     try {
-      const accessToken = await getOAuth2AccessToken(credentials, env);
+      const accessToken = await getCachedOrNewAccessToken(env);
       
       // Test the access token with a simple API call
       const response = await fetch('https://api.twitter.com/2/tweets', {
@@ -337,7 +446,7 @@ export async function validateBearerTokenDetailed(env) {
 
         return {
           success: true,
-          message: 'OAuth 2.0 credentials are valid and working',
+          message: 'OAuth 2.0 credentials are valid and working (full validation with test tweet)',
           details: `Successfully authenticated with Client ID: ${credentials.clientId}`,
           clientId: credentials.clientId
         };

@@ -721,6 +721,56 @@ export function getDashboardHTML() {
 
         // === X (TWITTER) FUNCTIONS ===
         
+        // Check cached validation before making API calls - NEW
+        async function checkCachedValidation() {
+          try {
+            const response = await fetch('/api/cached-validation');
+            const result = await response.json();
+            
+            if (result.success && result.cached) {
+              // Use cached result
+              showStatus('Token validated (cached result - no API calls made)', 'success');
+              return true;
+            }
+            
+            return false; // No valid cached result
+          } catch (error) {
+            console.error('Error checking cached validation:', error);
+            return false;
+          }
+        }
+
+        // Enhanced testBearerToken function - NEW
+        async function testBearerToken() {
+          try {
+            // First check for cached validation result
+            const cachedResult = await checkCachedValidation();
+            if (cachedResult) {
+              return; // Used cached result, no need to make API call
+            }
+            
+            // No cached result, proceed with validation
+            showStatus('Validating token...', 'info');
+            
+            const response = await fetch('/api/test-bearer-token', {
+              method: 'POST'
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+              const message = result.cached ? 
+                'Token validated (cached result)' : 
+                'Token validated successfully';
+              showStatus(message, 'success');
+            } else {
+              showStatus('Token validation failed: ' + result.error, 'error');
+            }
+          } catch (error) {
+            showStatus('Error validating token: ' + error.message, 'error');
+          }
+        }
+        
         // Toggle X settings panel visibility
         function toggleXSettings() {
           const enabled = document.getElementById('xEnabled').checked;
@@ -856,7 +906,7 @@ export function getDashboardHTML() {
           }
         }
         
-        // Test X posting
+        // Test X posting - ENHANCED with rate limiting feedback
         async function testXPost() {
           const template = document.getElementById('template').value;
           
@@ -884,6 +934,9 @@ export function getDashboardHTML() {
                 previewContent.textContent = \`[X POST] \${result.preview}\`;
                 previewContent.classList.remove('empty');
               }
+            } else if (result.rateLimited) {
+              // Special handling for rate limiting
+              showStatus('⏱️ ' + result.error, 'warning');
             } else {
               showStatus('X test failed: ' + result.error, 'error');
               // Still show preview even if posting failed
